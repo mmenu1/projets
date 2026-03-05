@@ -12,26 +12,44 @@ class GF256:
     def __sub__(self, autre):   # on pourra ensuite utiliser -
         return GF256(self.valeur ^ autre.valeur)
 
-    def __mul__(self, autre):  # on pourra ensuite utiliser *
-        # Multiplication dans GF(256)
+    
+    def __mul__(self, autre):
+        a = self.valeur
+        b = autre.valeur
         p = 0
-        for i in range(8):
-            if autre.valeur & (1 << i): # 
-                p ^= self.valeur << i
-        # Réduction modulo par le polynôme irréductible x^8 + x^4 + x^3 + x + 1
-        for i in range(8, 15):
-            p ^= ((p >> 8) & 1) * 0x11D
-        return GF256(p & 0xFF)
 
+        for _ in range(8):
+            if b & 1:
+                p ^= a
+
+            carry = a & 0x80  # bit de poids fort
+            a <<= 1
+
+            if carry:
+                a ^= 0x11D  # réduction modulo le polynôme irréductible
+
+            a &= 0xFF  # garder 8 bits
+            b >>= 1
+
+        return GF256(p)
+    
+    
+    def __pow__(self, puissance):
+        res = GF256(1)
+        base = GF256(self.valeur)
+        while puissance > 0:
+            if puissance & 1:
+                res = res * base
+            base = base * base
+            puissance >>= 1
+        return res
+
+    def inverse(self):
+        return self**254  # On utilise la relation self**255=1 dans le groupe multiplicatif (F_256)* (Lagrange)
 
     def __truediv__(self, autre):
         # La division est la multiplication par l'inverse
         return self * autre.inverse()
-
-    def inverse(self):
-        # Utiliser l'algorithme d'Euclide étendu pour trouver l'inverse
-        # Ceci est un espace réservé ; l'implémentation réelle est requise
-        pass
 
     def __eq__(self, autre):
         return self.valeur == autre.valeur
@@ -43,11 +61,9 @@ class GF256:
         # Convertir la valeur en une chaîne de bits
         return bin(self.valeur)[2:].zfill(8)
     
-a=GF256(5)
-b=GF256(3)
-c = a * b 
-print(a)
-#print(__repr__(c))
+
+
+alpha = GF256(2)   # générateur 
 
 class ReedSolomon:
     def __init__(self, k, n):
@@ -71,6 +87,32 @@ class ReedSolomon:
 
         # Retourner le message encodé (données + redondance)
         return message + redondance
+    
+    def poly_add(self, p, q):
+        max_len = max(len(p), len(q))
+        res = [GF256(0)] * max_len
+        for i in range(len(p)):
+            res[i + max_len - len(p)] += p[i]
+        for i in range(len(q)):
+            res[i + max_len - len(q)] += q[i]
+        return res
+    
+    def polymul(self, p, q):
+        res = [GF256(0)] * (len(p) + len(q) - 1)
+        for i in range(len(p)):
+            for j in range(len(q)):
+                res[i + j] += p[i] * q[j]
+        return res
+    
+    def poly_eval(self, p, x):
+        res = GF256(0)
+        for c in p:
+            res = res * x + c
+        return res
+    
+    def derivee_polynome(self, p):
+        deg_max = len(p) - 1
+        return [p[i] for i in range(deg_max) if (deg_max - i) % 2 == 1] # on est en caractéristique 2
 
     def calculer_syndrome(self, recu):
         syndrome = []
@@ -81,27 +123,75 @@ class ReedSolomon:
             syndrome.append(s.valeur)
         return syndrome
 
-    def berlekamp_massey(self, syndrome):
-        # Espace réservé pour l'algorithme de Berlekamp-Massey
-        # Implémenter l'algorithme pour trouver le polynôme localisateur d'erreurs
-        pass
+    def berlekamp_massey(self, syndrome): # Trouve le polynoôme localisateur d'erreurs
+        n = len(syndrome)
+        C = [self.gf(1)] + [self.gf(0)] * n
+        B = [self.gf(1)] + [self.gf(0)] * n
 
-    def forney(self, localisateur_erreur, syndrome):
-        # Espace réservé pour l'algorithme de Forney
-        # Implémenter l'algorithme pour trouver les valeurs des erreurs
-        pass
+        L = 0
+        m = -1
+        b = self.gf(1)
 
-    def decoder(self, message_encodé):
-        syndrome = self.calculer_syndrome(message_encodé)
-        if all(s == 0 for s in syndrome):
-            return message_encodé[:self.k]  # Aucune erreur
+        for i in range(n):
+            # Calcul du delta
+            delta = self.gf(syndrome[i])
+            for j in range(1, L + 1):
+                delta += C[j] * self.gf(syndrome[i - j])
 
-        localisateur_erreur = self.berlekamp_massey(syndrome)
-        valeurs_erreur = self.forney(localisateur_erreur, syndrome)
+            if delta != self.gf(0):
+                T = C.copy()
+                facteur = delta / b
 
-        # Corriger les erreurs
-        message_corrigé = message_encodé.copy()
-        for pos, val in valeurs_erreur:
-            message_corrigé[pos] ^= val
+                for j in range(i - m, n):
+                    if j < len(B):
+                        C[j] -= facteur * B[j - (i - m)]
 
-        return message_corrigé[:self.k]
+                if 2 * L <= i:
+                    L = i + 1 - L
+                    B = T
+                    b = delta
+                    m = i
+
+        return C[:L + 1]
+    
+    def trouver_positions_erreurs(self, locator, n):
+        pos = []
+        for i in range(n):
+            x = alpha ** i
+            if self.poly_eval(locator, x) == GF256(0):
+                pos.append(n - 1 - i)
+        #if len(pos) != len(locator) - 1:
+          #  raise ValueError("Racines incorrectes.")
+        return pos
+    
+    def calculer_valeurs_erreurs(self, pos, locator, syndromes): #implémentation de l'algo de Forney
+        omega = self.polymul(locator, [self.gf(s) for s in reversed(syndromes)])[-(len(locator)-1):] # on prend les t premiers coefficients de omega
+        derivee = self.derivee_polynome(locator)
+
+        valeurs = []
+        for i in pos:
+            x_inv = alpha ** (255 - i)
+            num = self.poly_eval(omega, x_inv)
+            den = self.poly_eval(derivee, x_inv)
+            valeurs.append(num / den)
+
+        return valeurs
+
+
+    
+    def decoder(self, mot):     #décodage final
+        synd = self.calculer_syndrome(mot)
+
+        if all(s == 0 for s in synd):
+            return mot[:self.k]
+
+        locator = self.berlekamp_massey(synd)
+        pos = self.trouver_positions_erreurs(locator, len(mot))
+        val = self.calculer_valeurs_erreurs(pos, locator, synd)
+
+        mot_corrige = list(mot)
+        for p, v in zip(pos, val):
+            mot_corrige[p] ^= v.valeur
+
+        return mot_corrige[:self.k]
+
