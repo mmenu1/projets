@@ -9,6 +9,9 @@ Cible : credit_risk — deux classes : good / bad
 Déséquilibre : environ 70% good / 30% bad
 
 Séparation des variables numériques et catégorielles
+
 Etude de l'influence du choix de k et de la normalisation sur la précision du modèle
+
 Méthodes de validation croisée
+
 Evaluation de l'overfitting en fonction de k
